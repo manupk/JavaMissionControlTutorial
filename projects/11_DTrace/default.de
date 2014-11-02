@@ -1,0 +1,1024 @@
+// ************ Recording Parameters ***********************
+@name = "Process Identifier";
+@description = "The unique identifier for the process.";
+@type = "process";
+parameter processIdentifier;
+
+@name = "Allocation Block Size";
+@type = "memory";
+parameter objectAllocationCutoff;
+
+// *********** Profiling Templates **************
+
+@name ="Hotspot Profiling JDK6/JDK7";
+template hotspotProfiling
+{
+	parameter processIdentifier (application = "java*");
+	parameter objectAllocationCutoff(min = 1, value = 4096, max = 200000000);
+	
+	probeset Allocation (enabled = true);
+	probeset ClassLoading (enabled = true);
+	probeset GC (enabled = true);
+	probeset IO (enabled = true);
+	probeset JVMLocks (enabled = true);
+	probeset JVMCompilation (enabled = true);
+	probeset JVMOperations (enabled = true);
+	probeset JavaLocks (enabled = true);
+	probeset Paging (enabled = true);
+	probeset Scheduling (enabled = true);
+	probeset SystemCalls (enabled = true);
+};
+
+
+// *********** Global Mixins ********************
+
+mixin Threadable
+{
+	@name = "Thread";
+	@description = "The thread the event occurred in.";
+	@type = "thread";
+	int thread;
+};
+
+// *********** Scheduling Events ****************
+@name ="Scheduling";
+@description = "Records thread related information."; 
+probeset Scheduling
+{
+	probe cpu_on;
+	probe cpu_off;
+	probe cpu_exit;
+	probe changed_priority;
+	probe thread_start;
+	probe thread_stop;
+	probe thread_park_begin;
+	probe thread_park_end;
+	probe thread_unpark;
+	probe thread_sleep_begin;
+	probe thread_sleep_end;
+	probe thread_yield;
+	probe thread_migration;
+};
+
+mixin CPU
+{
+	@name = "CPU Number";
+	int cpu;
+
+	@name = "Thread Priority";
+	int threadPriority;
+};
+
+mixin Parkable
+{
+	@name = "Park Duration";
+	@description = "The duration the thread was parked.";
+	@type = "timespan";
+	long parkDuration; 
+	
+	@name = "Parker Identifier";
+	@type = "index";
+	int parkerIdentifier;
+};
+
+@name = "Running Thread";
+@color = rgb(50, 255, 50);
+@path = "Operating_System/Thread/Running";
+event ThreadRunning 
+{
+	@name ="Thread Name";
+	string threadName;
+	
+	@name = "Thread";
+	@description = "The thread the event occured in.";
+	@type = "thread";
+	int thread;
+};
+
+@name = "Java Sleep";
+@description = "A thread that has been put to sleep.";
+@color = rgb(155, 129, 219);
+@path = "Java_Application/Thread_Sleep";
+event ThreadSleep extends Threadable
+{
+	@name = "Sleep Time";
+	@description = "The time the thread was asleep.";
+	@type = "timespan";
+	long timespan;
+};
+
+@name = "Thread Yield";
+@description = "A thread invokes Thread.yield()";
+@color = rgb(166, 92, 92);
+@path = "Java_Application/Thread_Yield";
+event ThreadYield extends Threadable
+{
+};
+
+@name = "Active CPU";
+@description = "Active CPU for the thread";
+@color = rgb(255, 64, 64);
+@path = "Operating_System/Scheduling/Active_CPU";
+event ActiveCPU extends CPU, Threadable
+{
+};
+
+@name = "Thread Migration";
+@description = "A thread moves from one CPU to another";
+@color = rgb(120, 152, 252);
+@path = "Operating_System/Scheduling/Thread_Migration";
+event ThreadMigration extends Threadable
+{
+	@name = "From CPU";
+	int fromCPU;
+
+	@name = "To CPU";
+	int toCPU;
+};
+
+@name = "Thread Parked";
+@description = "A thread has been parked.";
+@color = rgb(128, 128, 128);
+@path = "Java_Application/Thread Park";
+event ThreadParked extends Threadable, Parkable
+{
+	@name = "Flag";
+	@description = "";
+	@type = "";
+	int flag;
+};
+
+@name = "Thread Priority Change";
+@description = "A thread's priority is about to be changed";
+@color = rgb(230, 155, 155);
+@path = "Operating_System/Scheduling/Priority_Change";
+event ThreadPriorityChange extends Threadable
+{
+	@name = "Thread";
+	@description = "The thread.";
+	@type = "thread";
+	int thread;
+	
+	@name = "New Priority";
+	@description = "The new thread priority";
+	int newPriority;
+};
+
+probe cpu_on
+sched:::on-cpu
+/ pid == $processIdentifier && self->on_cpu == 0 /
+{
+	begin ActiveCPU ( thread = tid, cpu = cpu, threadPriority = "curthread->t_pri");
+	self->on_cpu = 1;
+}
+
+probe cpu_off
+sched:::off-cpu
+/ pid == $processIdentifier && self->on_cpu == 1 /
+{
+	end ActiveCPU ( thread = tid);
+	self->on_cpu = 0;
+}
+
+probe cpu_exit
+proc:::lwp-exit
+/ pid == $processIdentifier && self->on_cpu == 1/
+{
+	end ActiveCPU ( thread = tid);
+ 	self->on_cpu = 0;
+}
+
+self int last_cpu;
+probe thread_migration
+sched:::on-cpu
+/ pid == $processIdentifier && self->last_cpu != (cpu + 1) /
+{
+	emit ThreadMigration ( thread = tid, toCPU = cpu, fromCPU = "self->last_cpu");
+	self->last_cpu = cpu + 1;
+}
+
+probe changed_priority
+sched:::change-pri
+/ pid == $processIdentifier /
+{
+	emit ThreadPriorityChange(thread = "args[0]->pr_lwpid", newPriority = "args[2]");
+}
+ 
+probe thread_start
+hotspot$processIdentifier:::thread-start 
+{
+	begin ThreadRunning (thread = arg2, threadName = "copyinstr(arg0,arg1)");
+}
+
+probe thread_stop
+hotspot$processIdentifier:::thread-stop 
+{
+	end ThreadRunning (thread = arg2);
+}
+ 
+probe thread_park_begin
+hotspot$processIdentifier:::thread-park-begin
+{
+	begin ThreadParked (thread = tid, parkerIdentifier = arg0, flag = arg1, parkDuration = arg2);
+}
+probe thread_park_end
+hotspot$processIdentifier:::thread-park-end
+{
+	end ThreadParked (thread = tid,  parkerIdentifier = arg0);
+}
+
+probe thread_unpark
+hotspot$processIdentifier:::thread-unpark
+{
+	end ThreadParked (thread = tid,  parkerIdentifier = arg0);
+}
+
+probe thread_sleep_begin
+hotspot$processIdentifier:::thread-sleep-begin
+{
+	begin ThreadSleep (thread = tid, timespan = arg0);
+}
+
+probe thread_sleep_end
+hotspot$processIdentifier:::thread-sleep-end
+{
+	end ThreadSleep (thread = tid);
+}
+
+probe thread_yield
+hotspot$processIdentifier:::thread-yield
+{
+	emit ThreadYield (thread = tid);
+}
+
+// *********** Class loading ********************
+@name ="Class Loading";
+@description ="Record information related to classloading.";
+probeset ClassLoading
+{
+	probe class_definition;
+	probe class_load;
+	probe class_unload;
+	probe class_initialization_required;
+	probe class_initialization_recursive;
+	probe class_initialization_concurrent;
+	probe class_initialization_erroneous;
+	probe class_initialization_super_failed;
+	probe class_initialization_clinit;
+	probe class_initialization_error;
+	probe class_initialization_end;
+};
+
+mixin Class extends Threadable
+{
+	@name = "Class";
+	@description = "";
+	@type = "class";
+	int class;
+};
+
+@name = "Class Initialization Recursive";
+@description = "";
+@color = rgb(255, 0, 0);
+@path = "Java_Virtual_Machine/Class_Loading/Class_Initialization_Recursive";
+event ClassInitializationRecursive extends Class 
+{
+};
+
+@name = "Class Initialization Concurrent";
+@description = "";
+@color = rgb(255, 0, 0);
+@path = "Java_Virtual_Machine/Class_Loading/Class_Initialization_Concurrent";
+event ClassInitializationConcurrent extends Class 
+{
+};
+
+@name = "Class Loaded";
+@description = "Thread loads a new class";
+@color = rgb(0, 105, 105);
+@path = "Java_Virtual_Machine/Class_Loading/Class_Loaded";
+event ClassLoaded  extends Class 
+{
+};
+
+@name = "Class Initialization Required";
+@description = "A class is required to be initialized and the current thread proceeds to initiate the initiation.";
+@color = rgb(255, 128, 128);
+@path = "Java_Virtual_Machine/Class_Loading/Class_Initialization_Required";
+event ClassInitializationRequired extends Class 
+{
+};
+
+@name = "Class Initialization <clinit>";
+@description = "A thread commences execution of the <init> method";
+@color = rgb(206, 0, 0);
+@path = "Java_Virtual_Machine/Class_Loading/Class_Initialization_Clinit";
+event ClassInitialization extends Class 
+{
+};
+
+@name = "Class Initialization End";
+@description = "Successful execution of the <clinit> method and the class has been marked as initialized.";
+@color = rgb(0, 255, 255);
+@path = "Java_Virtual_Machine/Class_Loading/Class_Initialization_End";
+event ClassInitializationEnd   extends Class 
+{
+};
+
+@name = "Class Unloaded";
+@description = "A class is unloaded from the JVM";
+@color = rgb(230, 99, 99);
+@path = "Java_Virtual_Machine/Class_Loading/Class_Unloaded";
+event ClassUnloaded   extends Class 
+{
+};
+
+@name = "Class Super Failed";
+@color = rgb(230, 99, 99);
+@path = "Java_Virtual_Machine/Class_Loading/Class_Super_Failed";
+event ClassSuperFailed extends Class 
+{
+};
+
+@name = "Class Initialization Error";
+@color = rgb(255, 0, 0);
+@path = "Java_Virtual_Machine/Class_Loading/Class_Initialiation_Error";
+event ClassInitializationError  extends Class 
+{
+};
+@name = "Class Definition";
+@color = rgb(255, 0, 0);
+@path = "Java_Virtual_Machine/Class_Loading/Class_Definition";
+event ClassDefinition  extends Threadable 
+{
+	@name = "Class Identifier";
+	@description = "";
+	int classIdentifier;
+	
+	@name = "Class Name";
+	@description = "";
+	string className;
+};
+
+self int classID[string];
+
+probe class_definition
+hotspot$processIdentifier:::class-loaded,
+hotspot$processIdentifier:::class-unloaded
+/ self->classID[copyinstr(arg0,arg1)]==0 /
+{
+	self->n++;
+	s = copyinstr(arg0,arg1);
+	self->classID[s] = self->n;
+	emit ClassDefinition ( thread = tid, classIdentifier = "self->n", className = s);
+}
+
+probe class_load 
+hotspot$processIdentifier:::class-loaded
+{
+	emit ClassLoaded ( thread = tid, class = "self->classID[copyinstr(arg0,arg1)]");
+}
+
+probe class_unload 
+hotspot$processIdentifier:::class-unloaded
+/ pid == $processIdentifier /
+{
+	emit ClassUnloaded ( thread = tid, class = "self->classID[copyinstr(arg0,arg1)]");
+}
+probe class_initialization_required
+hotspot$processIdentifier:::class-initialization-required
+{
+	emit ClassInitializationRequired ( thread = tid, class = "self->classID[copyinstr(arg0,arg1)]");
+}
+
+probe class_initialization_recursive
+hotspot$processIdentifier:::class-initialization-recursive
+{
+	emit ClassInitializationRecursive ( thread = tid, class = "self->classID[copyinstr(arg0,arg1)]");
+}
+
+probe class_initialization_concurrent
+hotspot$processIdentifier:::class-initialization-concurrent
+{
+	emit ClassInitializationConcurrent ( thread = tid, class = "self->classID[copyinstr(arg0,arg1)]");
+}
+
+probe class_initialization_erroneous
+hotspot$processIdentifier:::class-initialization-erroneous
+{
+	emit ClassInitializationError(thread = tid, class = "self->classID[copyinstr(arg0,arg1)]");
+}
+
+probe class_initialization_super_failed
+hotspot$processIdentifier:::class-initialization-super-failed
+{
+	 emit ClassSuperFailed(thread = tid, class = "self->classID[copyinstr(arg0,arg1)]");
+}
+
+probe class_initialization_clinit
+hotspot$processIdentifier:::class-initialization-clinit
+{
+	 emit ClassInitialization(thread = tid, class = "self->classID[copyinstr(arg0,arg1)]");
+}
+
+probe class_initialization_error
+hotspot$processIdentifier:::class-initialization-error
+{
+	 emit ClassInitializationError(thread = tid, class = "self->classID[copyinstr(arg0,arg1)]");
+}
+
+probe class_initialization_end
+hotspot$processIdentifier:::class-initialization-end
+{
+	 emit ClassInitializationEnd(thread = tid, class = "self->classID[copyinstr(arg0,arg1)]");
+}
+
+
+// *********** Monitoring ***********************
+@name = "Java Locks";
+@description =" Recording Java synchronization related information.";
+probeset JavaLocks
+{
+	probe class_definition2;
+	probe monitor_contended_enter;
+	probe monitor_contended_entered;
+	probe monitor_contended_exit;
+	probe monitor_wait;
+	probe monitor_waited;
+	probe monitor_notify;
+	probe monitor_notifyAll;
+};
+
+mixin ClassLockable
+{
+	@name = "Monitor Identifier";
+	@description = "Identifier for the specific monitor";
+	long monitorIdentifier;
+	
+	@name = "Class";
+	@description = "Class that the lock was synchronized on.";
+	@type = "class";
+	int class;
+};
+
+@name = "Java Blocked";
+@description = "Blocked on a Java monitor";
+@color = rgb(255, 109, 100);
+@path = "Java_Application/Monitor_Blocked";
+event JavaMonitorBlocked extends Threadable, ClassLockable
+{
+};
+
+@name = "Java Wait";
+@description = "Monitor wait after a call to Object.wait()";
+@color = rgb(255, 231, 91);
+@path = "Java_Application/Monitor_Wait";
+event JavaMonitorWait extends Threadable, ClassLockable
+{
+};
+
+@name = "Java Monitor Held";
+@description = "A monitor held by the application";
+@color = rgb(155, 100, 100);
+@path = "Java_Application/Monitor_Held";
+event JavaMonitorHeld extends Threadable, ClassLockable
+{
+};
+
+@name = "Java Notify";
+@description = "A thread calls Object.notify()";
+@color = rgb(155, 255, 40);
+@path = "Java_Application/Java_Notify";
+event JavaMonitorNotify extends Threadable, ClassLockable
+{
+};
+
+@name = "Java Notify All";
+@description = "A thread calls Object.notifyAll()";
+@color = rgb(155, 105, 140);
+@path = "Java_Application/Java_Notify_All";
+event JavaMonitorNotifyAll extends Threadable, ClassLockable
+{
+};
+
+probe class_definition2
+hotspot$processIdentifier:::monitor-contended-enter,
+hotspot$processIdentifier:::monitor-contended-entered,
+hotspot$processIdentifier:::monitor-contended-exit,
+hotspot$processIdentifier:::monitor-wait,
+hotspot$processIdentifier:::monitor-waited,
+hotspot$processIdentifier:::monitor-notify,
+hotspot$processIdentifier:::monitor-notifyAll
+/ self->classID[s=copyinstr(arg2,arg3)]==0 /
+{
+	self->n++;
+	self->classID[s] = self->n;
+	emit ClassDefinition (thread = tid, classIdentifier = "self->n", className = s);
+}
+
+probe monitor_contended_enter
+hotspot$processIdentifier:::monitor-contended-enter
+{
+	begin JavaMonitorBlocked ( thread = tid, monitorIdentifier = arg1, class = "self->classID[copyinstr(arg2,arg3)]");
+}
+
+probe monitor_contended_entered
+hotspot$processIdentifier:::monitor-contended-entered
+{
+	end JavaMonitorBlocked ( thread = tid, monitorIdentifier = arg1, class = "self->classID[copyinstr(arg2,arg3)]");
+	begin JavaMonitorHeld( thread = tid, monitorIdentifier = arg1, class = "self->classID[copyinstr(arg2,arg3)]");
+}
+
+probe monitor_contended_exit
+hotspot$processIdentifier:::monitor-contended-exit
+{
+	end JavaMonitorHeld( thread = tid, monitorIdentifier = arg1, class = "self->classID[copyinstr(arg2,arg3)]");
+}
+
+probe monitor_wait
+hotspot$processIdentifier:::monitor-wait
+{
+	begin JavaMonitorWait ( thread =tid, monitorIdentifier = arg1, class = "self->classID[copyinstr(arg2,arg3)]");
+}
+
+probe monitor_waited
+hotspot$processIdentifier:::monitor-waited
+{
+	end JavaMonitorWait ( thread =tid, monitorIdentifier = arg1, class = "self->classID[copyinstr(arg2,arg3)]");
+}
+
+probe monitor_notify
+hotspot$processIdentifier:::monitor-notify
+{
+	emit JavaMonitorNotify ( thread = tid, monitorIdentifier = arg1, class = "self->classID[copyinstr(arg2,arg3)]");
+}
+
+probe monitor_notifyAll
+hotspot$processIdentifier:::monitor-notifyAll
+{
+	emit JavaMonitorNotifyAll ( thread = tid, monitorIdentifier = arg1, class = "self->classID[copyinstr(arg2,arg3)]");
+}
+
+// *********** Locks ****************************
+@name = "JVM Locks";
+@description ="Record JVM native locks.";
+probeset JVMLocks
+{
+	probe mutex_block;
+	probe mutex_acquire;
+	probe mutex_release;
+};
+
+mixin JVMMonitor
+{
+	@name = "Monitor Identifier";
+	@description = "";
+	@type = "";
+	long monitorIdentifier;
+};
+
+@name = "JVM Monitor Blocked";
+@description = "Time spent blocked on a JVM-level lock.";
+@color = rgb(215, 50, 50);
+@path = "Java_Virtual_Machine/Locks/JVM_Monitor_Block";
+event JVMMonitorBlocked extends Threadable, JVMMonitor
+{
+};
+
+@name = "JVM Monitor Held";
+@description = "Time spent in a JVM-level lock";
+@color = rgb(225, 0, 0);
+@path = "Java_Virtual_Machine/Locks/JVM_Monitor_Held";
+event JVMMonitorHeld  extends Threadable, JVMMonitor
+{
+};
+
+probe mutex_block
+plockstat$processIdentifier:::mutex-block
+{
+	self->blocked = 1;
+	begin JVMMonitorBlocked ( thread = tid, monitorIdentifier = arg0);
+}
+
+probe mutex_acquire
+plockstat$processIdentifier:::mutex-acquire
+/ self->blocked == 1/
+{
+	begin JVMMonitorHeld ( thread = tid, monitorIdentifier = arg0);
+}
+
+probe mutex_release
+plockstat$processIdentifier:::mutex-release
+/ self->blocked == 1 /
+{
+	self->blocked = 0;
+	
+	end JVMMonitorHeld ( thread = tid, monitorIdentifier = arg0);
+	end JVMMonitorBlocked ( thread = tid, monitorIdentifier = arg0);
+}
+
+// ************* Compilation *****************
+@name ="Compilation";
+@description="Record JVM compilation related information";
+probeset JVMCompilation
+{
+	probe method_compile_begin;
+	probe method_compile_end;
+	probe compiled_method_load;
+	probe compiled_method_unload;
+};
+
+mixin Method
+{
+	@name = "Class";
+	@type = "method";
+	string class;
+	
+	@name = "Method Name";
+	@type = "method";
+	string method;
+	
+	@name = "Method Descriptor";
+	@type = "method";
+	string descriptor;
+};
+
+@name = "Compiled Method Unload";
+@description = "[missing]";
+@color = rgb(50, 255, 255);
+@path = "Java_Virtual_Machine/Compilation/Compiled_Method_Unload";
+event CompiledMethodUnload extends Threadable, Method
+{
+};
+
+@name = "Method Compilation";
+@description = "Method compilation by the JVM.";
+@color = rgb(198, 255, 255);
+@path = "Java_Virtual_Machine/Compilation/Method Compilation";
+event MethodCompilation extends Threadable, Method
+{
+};
+
+@name = "Compiled Method Load";
+@description = "";
+@color = rgb(230, 156, 156);
+@path = "Java_Virtual_Machine/Compilation/Compiled_Method_Load";
+event CompiledMethodLoad  extends Threadable, Method
+{
+};
+
+probe method_compile_begin
+hotspot$processIdentifier:::method-compile-begin
+{
+	begin MethodCompilation (thread = tid, class = "copyinstr(arg2,arg3)", method = "copyinstr(arg4,arg5)", descriptor = "copyinstr(arg6,arg7)");
+}
+
+probe method_compile_end
+hotspot$processIdentifier:::method-compile-end
+{
+	end MethodCompilation (thread = tid, class = "copyinstr(arg2,arg3)", method = "copyinstr(arg4,arg5)", descriptor = "copyinstr(arg6,arg7)");
+}
+
+probe compiled_method_load
+hotspot$processIdentifier:::compiled-method-load
+{
+	emit  CompiledMethodLoad (thread = tid, class = "copyinstr(arg0,arg1)", method = "copyinstr(arg2,arg3)", descriptor = "copyinstr(arg4,arg5)");
+}
+probe compiled_method_unload
+hotspot$processIdentifier:::compiled-method-unload
+{
+	emit  CompiledMethodUnload (thread = tid, class = "copyinstr(arg0,arg1)", method = "copyinstr(arg2,arg4)", descriptor = "copyinstr(arg4,arg5)");
+}
+
+// ****************** JVM  ******************************
+@name = "JVM Operations";
+@description = "Record JVM operations,";
+probeset JVMOperations
+{
+	probe vmpos_request;
+	probe vmpos_begin;
+	probe vmops_end;
+};
+
+mixin Operationable
+{
+	@name = "Operation";
+	@type = "text";
+	string operation;
+
+	@name = "Value";
+	int value;
+};
+
+@name = "JVM Operation";
+@description = "An operation executed by the JVM.";
+@color = rgb(128, 128, 128);
+@path = "Java_Virtual_Machine/JVM_Operation";
+event JVMOperation extends Threadable, Operationable
+{
+};
+
+@name = "JVM Operation Request";
+@description = "A JVM operation was requested.";
+@color = rgb(64, 128, 128);
+@path = "Java_Virtual_Machine/Request";
+event JVMOperationRequest  extends Threadable, Operationable
+{
+};
+
+probe vmpos_request
+hotspot$processIdentifier:::vmops-request
+{  
+	emit JVMOperationRequest (thread = tid, operation= "copyinstr(arg0,arg1)", value = arg2);
+}
+
+probe vmpos_begin
+hotspot$processIdentifier:::vmops-begin
+{
+	begin JVMOperation (thread = tid, operation= "copyinstr(arg0,arg1)", value = arg2);
+}
+
+probe vmops_end
+hotspot$processIdentifier:::vmops-end
+{
+	end JVMOperation (thread = tid, operation = "copyinstr(arg0,arg1)", value = arg2);
+}
+
+// *********** Allocation ***********************
+
+@name = "Allocation";
+probeset Allocation
+{
+	probe object_alloc_counter;
+	probe object_alloc_emit;
+};
+
+@name = "Heap Block Allocation";
+@color = rgb(128, 128, 0);
+@path = "Java_Application/Heap_Block_Allocation";
+event HeapBlockAllocation extends Threadable
+{
+	@name = "Size";
+	@description = "The amount that was allocated";
+	@type = "memory";
+	int size;
+};
+
+self int alloc;
+
+probe object_alloc_counter
+hotspot$processIdentifier:::object-alloc
+/ self->alloc+arg3< $objectAllocationCutoff /
+{
+	self->alloc=self->alloc+arg3;
+}
+probe object_alloc_emit
+hotspot$processIdentifier:::object-alloc
+/ self->alloc+arg3>= $objectAllocationCutoff /
+{
+	emit HeapBlockAllocation ( thread = tid, size = "self->alloc+arg3");
+	self->alloc=0;
+}
+
+// ***********  I/O  ****************************
+@name = "I/O";
+@description ="Record I/O related information";
+probeset IO
+{
+	probe read_io;
+	probe write_io;
+};
+
+mixin IOAmount
+{
+	@name = "Size";
+	@description = "";
+	@type = "memory";
+	int size;
+};
+
+@name = "I/O Read";
+@color = rgb(0, 0, 255);
+@path = "Operating_System/IO/IO_Read";
+event IORead extends Threadable, IOAmount
+{
+};
+
+@name = "I/O Write";
+@color = rgb(69, 210, 230);
+@path = "Operating_System/IO/IO_Write";
+event IOWrite  extends Threadable, IOAmount
+{
+};
+
+probe read_io
+syscall::*read:entry
+/ pid == $processIdentifier /
+{
+	emit IORead(thread = tid, size = arg2);
+}	
+probe write_io
+syscall::*write:entry
+/ pid == $processIdentifier /
+{
+	emit IOWrite(thread = tid, size = arg2);
+}
+
+// ************* Paging ******************
+@name ="Paging";
+@description = "Record paging related information, i.e. page faults."; 
+probeset Paging
+{
+	probe page_in;
+	probe page_out;
+	probe as_fault;
+	probe kernel_asfault;
+	probe maj_fault;
+	probe prot_fault;
+	probe zfod;
+}; 
+
+@name = "Copy On Write Fault";
+@description = "A copy-on-write fault is taken on a page.";
+@color = rgb(230, 105, 105);
+@path = "Operating_System/Paging/Copy_On_Write_Fault";
+event CopyOnWriteFault
+{
+};
+
+@name = "Page In";
+@description = "A page is paged in from the backing store or a swap device.";
+@color = rgb(190, 220, 220);
+@path = "Operating_System/Paging/Page In";
+event PageIn
+{
+};
+
+@name = "Major Page Fault";
+@description = "Page fault is taken that results in I/O from a backing store or swap device.";
+@color = rgb(255, 0, 0);
+@path = "Operating_System/Paging/PM";
+event MajorPageFault
+{
+};
+
+@name = "Page Out";
+@description = "A page is paged out to the backing store or a swap device.";
+@color = rgb(132, 193, 193);
+@path = "Operating_System/Paging/Page_Out";
+event PageOut
+{
+};
+
+@name = "Protection Fault";
+@description = "A page fault is taken due to a protection violation.";
+@color = rgb(230, 105, 105);
+@path = "Operating_System/Paging/Protection_Fault";
+event ProtectionFault
+{
+};
+
+@name = "Page As Fault";
+@description = "A fault is taken on a page and the fault is neither a protection fault nor a copy-on-write fault.";
+@color = rgb(128, 128, 128);
+@path = "Operating_System/Paging/As_Fault";
+event PageAsFault
+{
+};
+
+@name = "Zero Filled Page on Demand";
+@description = "A zero-filled page is created on demand.";
+@color = rgb(240, 240, 240);
+@path = "Operating_System/Paging/Zero_Filled_Page_on_Demand";
+event ZeroFilledPageonDemand
+{
+};
+
+@name = "Page Kernel As Fault";
+@description = "Page fault is taken by the kernel on a page in its own address space.";
+@color = rgb(240, 240, 240);
+@path = "Operating_System/Paging/Page_Kernel_As_Fault";
+event PageKernelAsFault
+{
+};
+
+probe page_in
+vminfo:::pgin
+/pid == $processIdentifier /
+{
+	emit PageIn();
+}
+probe page_out
+vminfo:::pgout
+/pid == $processIdentifier /
+{
+	emit PageOut();
+}
+
+probe as_fault
+vminfo:::as_fault
+/pid == $processIdentifier /
+{
+	emit PageAsFault();
+}
+
+probe cow_fault	
+vminfo:::cow_fault
+/pid == $processIdentifier /
+{
+	emit CopyOnWriteFault();
+}
+
+probe kernel_asfault
+vminfo:::kernel_asfault
+/pid == $processIdentifier /
+{
+	emit PageKernelAsFault();
+}
+
+probe maj_fault
+vminfo:::maj_fault
+/pid == $processIdentifier/
+{
+	emit PageKernelAsFault();
+}
+
+probe prot_fault
+vminfo:::prot_fault
+/pid == $processIdentifier/
+{
+	emit ProtectionFault();
+}
+
+probe zfod
+vminfo:::zfod
+/pid == $processIdentifier/
+{
+	emit ZeroFilledPageonDemand();
+}
+
+// *********** System Calls *********************
+@name ="System Calls";
+@description = "Recording calls into the operating system."; 
+probeset SystemCalls
+{
+	probe syscall_entry;
+	probe syscall;
+}; 
+
+@name = "System Call";
+@description = "A call to the underlying operating system.";
+@color = rgb(210, 210, 210);
+@path = "Operating_System/System_Call";
+event SystemCall extends Threadable
+{
+	@name = "System Function";
+	@description = "The system function that was called";
+	string function;
+};
+
+
+probe syscall_entry
+syscall:::entry
+/ pid == $processIdentifier /
+{
+	begin SystemCall(thread = tid, function = probefunc); 
+}
+
+probe syscall
+syscall:::
+/ pid == $processIdentifier /
+{
+	end SystemCall(thread = tid, function = probefunc);
+}
+
+// **************  GC Events  *******************
+@name ="Garbage Collection";
+@description = "A garbage collection performed by the JVM.";
+probeset GC 
+{
+	probe gc_begin;
+	probe gc_end;
+};
+
+@name = "Garbage Collection";
+@description = "Occurs when the JVM reclaims memory that is no longer in use.";
+@color = rgb(255, 0, 0);
+@path = "Java_Virtual_Machine/Garbage_Collection/Garbage_Collection";
+event GarbageCollection extends Threadable
+{
+	@name = "Full GC";
+	boolean fullGC;
+};
+
+probe gc_begin
+hotspot$processIdentifier:::gc-begin
+{
+	begin GarbageCollection (thread = tid, fullGC = arg0);
+}
+	
+probe gc_end
+hotspot$processIdentifier:::gc-end
+{
+	end GarbageCollection (thread = tid);
+}
